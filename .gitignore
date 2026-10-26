@@ -35,4 +35,9 @@ pnpm-debug.log*
 DemoCLI/synthetic-client/output/
 
 # Generated test projects
-test-*/
+test-*/
+# Local AI tool settings and scratch scripts
+.claude/
+.cursor/
+.agents/
+scratch/
