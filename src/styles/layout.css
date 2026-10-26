@@ -12,14 +12,15 @@
 }
 
 .background-container {
-  position: absolute;
+  position: fixed;
   top: 0;
   left: 0;
   width: 100%;
   height: 100%;
   z-index: 0;
-  opacity: 0.6;
+  opacity: 0.75;
   pointer-events: none;
+  overflow: hidden;
 }
 
 /* ── Scene system ────────────────────────────────────────────────────────── */
@@ -109,60 +110,30 @@
 /* ── Gallery view ────────────────────────────────────────────────────────── */
 
 .gallery-container {
-  flex: 1;
-  overflow-y: auto;
-  overflow-x: hidden;
-  padding: 2rem 4rem;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(148, 163, 184, 0.2) transparent;
-}
-
-.gallery-container.no-scroll {
+  position: absolute;
+  left: calc(220px + 0.9rem);
+  right: calc(220px + 0.9rem);
+  top: 4.7rem;
+  height: 52vh;
   overflow: hidden;
-}
-
-.filter-bar {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 1rem;
-  margin-bottom: 2.5rem;
-  flex-wrap: nowrap;
-}
-
-.filter-chips-scroll {
-  display: none;
-}
-
-.filter-chip {
-  display: none;
+  padding: 0;
 }
 
 .comp-showcase-container {
   width: 100%;
-  margin: 0 auto;
-  flex: 1;
+  height: 100%;
   display: flex;
   flex-direction: column;
-  justify-content: center;
 }
 
 /* ── Sub-menu & back navigation ──────────────────────────────────────────── */
 
 .sub-menu-container {
   width: 100%;
-  max-width: 1400px;
-  margin: 0 auto;
-  padding: 2rem;
+  height: 100%;
+  padding: 0;
 }
 
-.back-nav-container {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 1rem;
-  margin-bottom: 3rem;
-}
 
 .back-to-types {
   background: rgba(255, 255, 255, 0.05);
@@ -193,14 +164,144 @@
   letter-spacing: -0.02em;
 }
 
+/* ── Top bar (CardNav + action buttons) ──────────────────────────────────── */
+
+.top-bar {
+  --top-bar-control-size: 56px;
+  --top-bar-actions-offset: 0px;
+  position: absolute;
+  top: 0.4rem;
+  left: calc(220px + 0.9rem);
+  right: calc(220px + 0.9rem);
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  z-index: 99;
+}
+
+.top-bar-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+  height: var(--top-bar-control-size);
+  align-items: center;
+  align-self: flex-start;
+  margin-top: var(--top-bar-actions-offset);
+}
+
+/* Mirror spacer — keeps CardNav truly centered between the action buttons */
+.top-bar-spacer {
+  width: calc(2 * var(--top-bar-control-size) + 6px);
+  height: var(--top-bar-control-size);
+  flex-shrink: 0;
+  pointer-events: none;
+  align-self: flex-start;
+  margin-top: var(--top-bar-actions-offset);
+}
+
+.nav-action-btn {
+  position: relative;
+  width: var(--top-bar-control-size);
+  height: var(--top-bar-control-size);
+  min-width: var(--top-bar-control-size);
+  min-height: var(--top-bar-control-size);
+  max-width: var(--top-bar-control-size);
+  max-height: var(--top-bar-control-size);
+  box-sizing: border-box;
+  border-radius: 14px;
+  background: rgba(9, 12, 20, 0.55);
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow:
+    0 8px 32px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.55);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+  flex-shrink: 0;
+  padding: 0;
+}
+
+.nav-action-btn:hover {
+  border-color: rgba(255, 255, 255, 0.18);
+  color: #f1f5f9;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.nav-action-btn--active {
+  border-color: rgba(99, 102, 241, 0.5);
+  background: rgba(99, 102, 241, 0.15);
+  color: #a5b4fc;
+  box-shadow:
+    0 8px 32px rgba(0, 0, 0, 0.45),
+    0 0 0 1px rgba(99, 102, 241, 0.2),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+/* ── Left component sidebar ──────────────────────────────────────────────── */
+
+.component-sidebar {
+  position: absolute;
+  left: 0.4rem;
+  top: 4.7rem;
+  height: 52vh;
+  width: 220px;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  background: rgba(9, 12, 20, 0.6);
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+
+/* ── Right generation sidebar ────────────────────────────────────────────── */
+
+.generation-sidebar {
+  position: absolute;
+  right: 0.4rem;
+  top: 4.7rem;
+  height: 52vh;
+  width: 220px;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  background: rgba(9, 12, 20, 0.6);
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+/* ── Bottom panel (Project Builder) ──────────────────────────────────────── */
+
+.bottom-panel {
+  position: absolute;
+  top: calc(4.7rem + 52vh + 0.4rem);
+  bottom: 0.4rem;
+  left: 0.4rem;
+  right: 0.4rem;
+  background: rgba(9, 12, 20, 0.7);
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 14px;
+  z-index: 10;
+  overflow: hidden;
+}
+
 /* ── Split view layout ───────────────────────────────────────────────────── */
 
 .split-view-container {
-  display: grid;
-  grid-template-columns: 280px 1fr 340px;
-  gap: 1.5rem;
   width: 100%;
-  max-width: 1600px;
-  margin: 0 auto;
-  align-items: start;
+  height: 100%;
 }

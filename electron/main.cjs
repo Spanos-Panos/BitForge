@@ -5,6 +5,7 @@ const ipcMain = electron.ipcMain;
 const dialog = electron.dialog;
 
 const path = require("node:path");
+const fs = require("fs");
 
 // Load .env configuration
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
@@ -15,6 +16,8 @@ const isDev = process.env.NODE_ENV === "development";
 const activeProcesses = new Map(); // Map<taskId, { proc, fullPath }>
 const { exec, spawn, execSync } = require('child_process');
 let appIsQuitting = false; // Guards before-quit to prevent re-entrancy loops
+let mainWindow = null;
+const presetWatchers = new Map(); // Map<webContents.id, { watcher, debounceTimer }>
 
 // ─── Survivor Registry ────────────────────────────────────────────────────────
 // Writes every running dev-server PID + path to a temp JSON file so that
@@ -210,6 +213,8 @@ function createWindow() {
 }
 
 const { autoUpdater } = require("electron-updater");
+const { buildBudgetPlan, clampStageBudget, GLOBAL_TASK_CAP_USD } = require("./budgetPolicy.cjs");
+const taskBudgetLedger = new Map(); // key: projectPath -> budget metadata
 
 app.whenReady().then(() => {
   cleanupSurvivorsFromRegistry(); // Kill any orphans from the previous session first
@@ -272,7 +277,14 @@ app.on("activate", () => {
 });
 
 // Generator IPC Setup
-const fs = require("fs");
+const {
+  validationFailure,
+  shapeFailure,
+  runWithRetry,
+  validateEnhancePromptPayload,
+  validateGeneratePlaygroundArgs,
+  validateStructurePayload,
+} = require("./ipcContracts.cjs");
 
 ipcMain.handle("select-directory", async () => {
   const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
@@ -283,26 +295,106 @@ ipcMain.handle("select-directory", async () => {
   return filePaths[0];
 });
 
-const { generatePlayground } = require("../DemoCLI/index.cjs");
-const { savePrompt, getHistory, clearHistory, openHistoryFolder, savePreset, listPresets, deletePreset } = require("./storage.cjs");
+ipcMain.handle("shell-open-path", async (event, folderPath) => {
+  if (!folderPath) return;
+  require('electron').shell.openPath(folderPath);
+});
+
+ipcMain.handle("check-directory-exists", async (event, folderPath) => {
+  if (!folderPath) return false;
+  try {
+    return require('fs').existsSync(folderPath);
+  } catch {
+    return false;
+  }
+});
+
+ipcMain.handle("open-in-vscode", async (event, folderPath) => {
+  if (!folderPath) return;
+  const { exec } = require('child_process');
+  const path = require('node:path');
+  
+  // Ensure we have an absolute, platform-specific path
+  const absolutePath = path.resolve(folderPath);
+  
+  console.log(`[Main] Opening in VS Code: ${absolutePath}`);
+  
+  // On Windows, 'code "path"' is the most reliable way to open a folder.
+  // We avoid the double-exec pattern which was causing two windows to open.
+  exec(`code "${absolutePath}"`, (err) => {
+    if (err) {
+      console.error(`[Main] Primary VS Code open failed for "${absolutePath}":`, err.message);
+      
+      // Fallback: try 'code .' with cwd as a last resort
+      console.log(`[Main] Attempting fallback with cwd...`);
+      exec(`code .`, { cwd: absolutePath }, (err2) => {
+        if (err2) {
+          console.error(`[Main] Fallback VS Code open also failed for "${absolutePath}":`, err2.message);
+        } else {
+          console.log(`[Main] Fallback open succeeded.`);
+        }
+      });
+    } else {
+      console.log(`[Main] VS Code opened successfully.`);
+    }
+  });
+});
+
+const { generatePlayground, generateStructure } = require("../DemoCLI/index.cjs");
+const { savePrompt, getHistory, clearHistory, openHistoryFolder, openPresetsFolder, savePreset, listPresets, deletePreset, importPresetFromFile } = require("./storage.cjs");
 
 ipcMain.handle("generate-playground", async (event, ...args) => {
-  let result;
-  let taskId;
+  const validation = validateGeneratePlaygroundArgs(args);
+  if (validation.error) {
+    return validationFailure("validation", validation.error);
+  }
 
-  // Polymorphic Handler: Detects if first arg is the new Rich Payload
-  if (args.length === 3 && typeof args[0] === 'object' && args[0].options) {
-    const payload = args[0];
-    taskId = args[2];
-    result = await generatePlayground(payload, event, taskId);
-  } else {
-    // Legacy Positional Arguments (Single Component)
-    const [category, name, usageCode, componentFiles, options, tid] = args;
-    taskId = tid;
-    result = await generatePlayground({
-      category, name, usageCode, componentFiles, options,
-      selectedComponents: [{ category, name, files: componentFiles, usageMarkdown: usageCode }]
-    }, event, taskId);
+  const taskId = validation.taskId;
+  let result;
+  try {
+    if (validation.isRichPayload) {
+      const payload = args[0];
+      const budgetPlan = buildBudgetPlan({
+        selectedComponents: payload.selectedComponents || [],
+        pages: payload.options?.pages || [],
+      });
+      payload.options = {
+        ...payload.options,
+        budgetPlan,
+        aiBudgetUsd: clampStageBudget(budgetPlan.generationCapUsd, 0.6),
+      };
+      if (event?.sender) {
+        event.sender.send(
+          "generate-log",
+          `[Budget] Global cap: $${GLOBAL_TASK_CAP_USD.toFixed(2)} | Enhance reserve: $${budgetPlan.enhanceReserveUsd.toFixed(2)} | Generation cap: $${payload.options.aiBudgetUsd.toFixed(2)} | Rework reserve: $${budgetPlan.reworkCapUsd.toFixed(2)}\n`,
+          taskId
+        );
+      }
+    }
+
+    result = await runWithRetry("generate-playground", async () => {
+      if (validation.isRichPayload) {
+        const payload = args[0];
+        return generatePlayground(payload, event, taskId);
+      }
+
+      // Legacy Positional Arguments (Single Component)
+      const [category, name, usageCode, componentFiles, options] = args;
+      return generatePlayground({
+        category, name, usageCode, componentFiles, options,
+        selectedComponents: []
+      }, event, taskId);
+    }, {
+      retries: 1,
+      timeoutMs: 20 * 60 * 1000,
+      shouldRetry: (msg) => /timeout|network|econn|etimedout|429/i.test(msg),
+      onRetry: (attempt, retries, message) => {
+        console.warn(`[Main] generate-playground retry ${attempt}/${retries}: ${message}`);
+        if (event?.sender) event.sender.send("generate-log", `[System] generate-playground retry ${attempt}/${retries}: ${message}\n`, taskId);
+      },
+    });
+  } catch (error) {
+    return shapeFailure("generate-playground", error);
   }
   
   // If a child process was started, track it in memory AND persist to the registry file.
@@ -313,8 +405,38 @@ ipcMain.handle("generate-playground", async (event, ...args) => {
     // CRITICAL: Must delete this before returning to renderer to avoid 'An object could not be cloned' error
     delete result.childProcess;
   }
-  
+
+  if (validation.isRichPayload && result.success && result.path) {
+    const budgetPlan = args[0]?.options?.budgetPlan;
+    const generationCap = clampStageBudget(args[0]?.options?.aiBudgetUsd ?? budgetPlan?.generationCapUsd, 0.6);
+    taskBudgetLedger.set(result.path, {
+      globalCapUsd: GLOBAL_TASK_CAP_USD,
+      generationCapUsd: generationCap,
+      createdAt: Date.now(),
+    });
+  }
+
+
+
   return result;
+});
+
+ipcMain.handle("generate-structure", async (event, options) => {
+  const validationError = validateStructurePayload(options);
+  if (validationError) return validationFailure("validation", validationError);
+  const taskId = `structure-${Date.now()}`;
+  try {
+    return await runWithRetry("generate-structure", () => generateStructure(options, event, taskId), {
+      retries: 1,
+      timeoutMs: 10 * 60 * 1000,
+      shouldRetry: (msg) => /timeout|network|econn|etimedout/i.test(msg),
+      onRetry: (attempt, retries, message) => {
+        if (event?.sender) event.sender.send("generate-log", `[System] generate-structure retry ${attempt}/${retries}: ${message}\n`, taskId);
+      },
+    });
+  } catch (error) {
+    return shapeFailure("generate-structure", error);
+  }
 });
 
 ipcMain.handle("terminate-task", async (event, taskId) => {
@@ -349,10 +471,136 @@ ipcMain.handle("storage-open-folder", async () => {
 ipcMain.handle("preset-save",   (_event, preset) => savePreset(preset));
 ipcMain.handle("preset-list",   ()               => listPresets());
 ipcMain.handle("preset-delete", (_event, id)     => deletePreset(id));
+ipcMain.handle("preset-open-folder", ()          => openPresetsFolder());
+ipcMain.handle("preset-watch-start", (event) => {
+  const sender = event.sender;
+  const senderId = sender.id;
+  if (presetWatchers.has(senderId)) return { success: true };
+
+  const presetsDir = path.join(app.getPath('documents'), '.reactBitsExplorer', 'presets');
+  fs.mkdirSync(presetsDir, { recursive: true });
+
+  const emitChange = () => {
+    try {
+      sender.send('preset-directory-changed', { changedAt: Date.now() });
+    } catch {}
+  };
+
+  const state = { watcher: null, debounceTimer: null };
+  const watcher = fs.watch(presetsDir, (_eventType, filename) => {
+    // Only react to preset json file operations.
+    if (filename && !String(filename).toLowerCase().endsWith('.json')) return;
+    if (state.debounceTimer) clearTimeout(state.debounceTimer);
+    state.debounceTimer = setTimeout(emitChange, 140);
+  });
+  state.watcher = watcher;
+  presetWatchers.set(senderId, state);
+
+  sender.once('destroyed', () => {
+    const existing = presetWatchers.get(senderId);
+    if (!existing) return;
+    if (existing.debounceTimer) clearTimeout(existing.debounceTimer);
+    try { existing.watcher?.close(); } catch {}
+    presetWatchers.delete(senderId);
+  });
+
+  return { success: true };
+});
+
+ipcMain.handle("preset-watch-stop", (event) => {
+  const senderId = event.sender.id;
+  const existing = presetWatchers.get(senderId);
+  if (!existing) return { success: true };
+  if (existing.debounceTimer) clearTimeout(existing.debounceTimer);
+  try { existing.watcher?.close(); } catch {}
+  presetWatchers.delete(senderId);
+  return { success: true };
+});
+ipcMain.handle("preset-import", async (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const presetsDir = path.join(app.getPath('documents'), '.reactBitsExplorer', 'presets');
+  // Ensure the folder exists so the dialog can navigate to it
+  fs.mkdirSync(presetsDir, { recursive: true });
+  // Including a filename in defaultPath forces Windows to always open in this folder
+  // rather than remembering the last-browsed location from other dialogs.
+  const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+    title: 'Import Preset',
+    defaultPath: path.join(presetsDir, 'preset.json'),
+    filters: [{ name: 'BitForge Preset', extensions: ['json'] }],
+    properties: ['openFile'],
+  });
+  if (canceled || !filePaths.length) return { canceled: true };
+  return importPresetFromFile(filePaths[0]);
+});
+
+
+
+// Single file picker (for MD and reference image uploads)
+ipcMain.handle("pick-single-file", async (event, filters) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+    properties: ['openFile'],
+    filters: filters || [{ name: 'All Files', extensions: ['*'] }],
+  });
+  if (canceled || !filePaths.length) return { canceled: true };
+  const filePath = filePaths[0];
+  const ext = require('path').extname(filePath).slice(1).toLowerCase();
+  // Image: return base64
+  if (['png', 'jpg', 'jpeg', 'webp'].includes(ext)) {
+    const data = fs.readFileSync(filePath);
+    const mime = ext === 'jpg' ? 'jpeg' : ext;
+    return {
+      canceled: false,
+      path: filePath,
+      base64: `data:image/${mime};base64,${data.toString('base64')}`,
+    };
+  }
+  // Text file: return content
+  const content = fs.readFileSync(filePath, 'utf-8');
+  return { canceled: false, path: filePath, content };
+});
+
+// Design inspiration image picker
+ipcMain.handle("design-pick-images", async (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+    properties: ['openFile', 'multiSelections'],
+    filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif'] }],
+  });
+  if (canceled || !filePaths.length) return [];
+  const fs = require('fs');
+  return filePaths.map(p => {
+    const data = fs.readFileSync(p);
+    const ext = path.extname(p).slice(1).replace('jpg', 'jpeg');
+    return { name: path.basename(p), path: p, base64: `data:image/${ext};base64,${data.toString('base64')}` };
+  });
+});
 
 ipcMain.handle("enhance-prompt", async (event, payload) => {
-  return await enhancePrompt(payload);
+  const validationError = validateEnhancePromptPayload(payload);
+  if (validationError) return validationFailure("validation", validationError);
+  try {
+    return await runWithRetry("enhance-prompt", () => enhancePrompt(payload, {
+      onProgress: (msg) => {
+        if (event?.sender) event.sender.send("generate-progress", `[Enhancer] ${msg}`, "enhance");
+      },
+      onLog: (msg) => {
+        if (event?.sender) event.sender.send("generate-log", msg, "enhance");
+      },
+    }), {
+      retries: 2,
+      timeoutMs: 2 * 60 * 1000,
+      shouldRetry: (msg) => /timeout|network|econn|etimedout|429|rate limit|temporarily unavailable/i.test(msg),
+      onRetry: (attempt, retries, message) => {
+        if (event?.sender) event.sender.send("generate-log", `[System] enhance-prompt retry ${attempt}/${retries}: ${message}\n`, "enhance");
+      },
+    });
+  } catch (error) {
+    return shapeFailure("enhance-prompt", error);
+  }
 });
+
+
 
 ipcMain.handle("add-component", async (event, { name, category, language, code, css, install, usage }) => {
   try {

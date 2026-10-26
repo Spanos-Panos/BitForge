@@ -55,6 +55,11 @@ contextBridge.exposeInMainWorld("reactBitsApi", {
     return { id, name, category, files, usage, install };
   },
   generatePlayground(...args) {
+    const [payloadOrCategory] = args;
+    if (typeof payloadOrCategory === "object" && payloadOrCategory !== null && payloadOrCategory.options) {
+      // For rich payload, we expect (payload, null, taskId)
+      return ipcRenderer.invoke("generate-playground", args[0], args[1], args[2]);
+    }
     return ipcRenderer.invoke("generate-playground", ...args);
   },
   onGenerateProgress(callback) {
@@ -97,9 +102,46 @@ contextBridge.exposeInMainWorld("reactBitsApi", {
   deletePreset(id) {
     return ipcRenderer.invoke("preset-delete", id);
   },
+  openPresetsFolder() {
+    return ipcRenderer.invoke("preset-open-folder");
+  },
+  importPreset() {
+    return ipcRenderer.invoke("preset-import");
+  },
+  startPresetWatch() {
+    return ipcRenderer.invoke("preset-watch-start");
+  },
+  stopPresetWatch() {
+    return ipcRenderer.invoke("preset-watch-stop");
+  },
+  onPresetDirectoryChanged(callback) {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on("preset-directory-changed", handler);
+    return () => ipcRenderer.removeListener("preset-directory-changed", handler);
+  },
   addComponent(payload) {
     return ipcRenderer.invoke("add-component", payload);
-  }
+  },
+  pickDesignImages() {
+    return ipcRenderer.invoke("design-pick-images");
+  },
+  generateStructure(options) {
+    return ipcRenderer.invoke("generate-structure", options);
+  },
+  openPath(path) {
+    return ipcRenderer.invoke("shell-open-path", path);
+  },
+  checkDirectoryExists(path) {
+    return ipcRenderer.invoke("check-directory-exists", path);
+  },
+  openInVSCode(path) {
+    return ipcRenderer.invoke("open-in-vscode", path);
+  },
+  onPresetImported(callback) {
+    const handler = (_event, result) => callback(result);
+    ipcRenderer.on('preset-imported', handler);
+    return () => ipcRenderer.removeListener('preset-imported', handler);
+  },
 });
 
 function safeReadDir(dirPath) {

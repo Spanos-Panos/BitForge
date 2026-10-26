@@ -19,6 +19,11 @@ function openHistoryFolder() {
   shell.openPath(PROMPTS_BASE_PATH);
 }
 
+function openPresetsFolder() {
+  ensurePresetsDir();
+  shell.openPath(PRESETS_DIR);
+}
+
 function formatTimestamp() {
   const now = new Date();
   const day = String(now.getDate()).padStart(2, '0');
@@ -109,10 +114,60 @@ function listPresets() {
   }
 }
 
+function resolvePresetFilePathById(id) {
+  ensurePresetsDir();
+
+  // Fast path for canonical filename format.
+  const canonicalPath = path.join(PRESETS_DIR, `${id}.json`);
+  if (fs.existsSync(canonicalPath)) return canonicalPath;
+
+  // Legacy/alternate filename fallback: find a JSON whose payload id matches.
+  const files = fs.readdirSync(PRESETS_DIR).filter(f => f.endsWith('.json'));
+  for (const file of files) {
+    const fullPath = path.join(PRESETS_DIR, file);
+    try {
+      const data = JSON.parse(fs.readFileSync(fullPath, 'utf-8'));
+      if (String(data?.id ?? '') === String(id)) return fullPath;
+    } catch {
+      // Ignore malformed JSON and continue scanning.
+    }
+  }
+
+  return canonicalPath;
+}
+
+// Resolved once so every deletePreset call can use it as a fallback root.
+const SYNTH_OUTPUT_ROOT = path.join(__dirname, '..', 'DemoCLI', 'synthetic-client', 'output');
+
 function deletePreset(id) {
   try {
-    const filePath = path.join(PRESETS_DIR, `${id}.json`);
+    const filePath = resolvePresetFilePathById(id);
+
+    // Read the preset before deleting so we can find the output folder
+    let outputPath = null;
+    if (fs.existsSync(filePath)) {
+      try {
+        const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+        // Primary: explicit path stored by the CLI
+        if (data._outputPath) {
+          outputPath = data._outputPath;
+        // Fallback: derive from projectName — covers presets generated before _outputPath was added
+        } else if (data.projectName) {
+          const candidate = path.join(SYNTH_OUTPUT_ROOT, data.projectName);
+          if (fs.existsSync(candidate)) outputPath = candidate;
+        }
+      } catch {}
+    }
+
+    // Delete the preset JSON from the presets folder
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+
+    // Delete the output folder (preset.json + brief.md)
+    if (outputPath && fs.existsSync(outputPath)) {
+      fs.rmSync(outputPath, { recursive: true, force: true });
+      console.log(`[Storage] Deleted output folder: ${outputPath}`);
+    }
+
     return { success: true };
   } catch (error) {
     console.error('[Storage] Failed to delete preset:', error);
@@ -120,4 +175,27 @@ function deletePreset(id) {
   }
 }
 
-module.exports = { savePrompt, getHistory, clearHistory, openHistoryFolder, savePreset, listPresets, deletePreset };
+function importPresetFromFile(filePath) {
+  try {
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    const preset = JSON.parse(raw);
+    if (!preset.id || !preset.name || !preset.selectedComponentIds) {
+      return { error: 'Invalid preset file — missing required fields.' };
+    }
+    ensurePresetsDir();
+    const destPath = path.join(PRESETS_DIR, `${preset.id}.json`);
+    let finalPreset = preset;
+    if (fs.existsSync(destPath)) {
+      finalPreset = { ...preset, id: `${preset.id}-imported` };
+    }
+    const finalPath = path.join(PRESETS_DIR, `${finalPreset.id}.json`);
+    fs.writeFileSync(finalPath, JSON.stringify(finalPreset, null, 2), 'utf-8');
+    console.log(`[Storage] Imported preset: ${finalPath}`);
+    return { success: true, preset: finalPreset };
+  } catch (err) {
+    console.error('[Storage] Failed to import preset:', err);
+    return { error: err.message };
+  }
+}
+
+module.exports = { savePrompt, getHistory, clearHistory, openHistoryFolder, openPresetsFolder, savePreset, listPresets, deletePreset, importPresetFromFile };
